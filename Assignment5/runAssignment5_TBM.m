@@ -1,0 +1,359 @@
+% runAssignment5
+%  group 9, AY2024-2025
+% to run:
+% > runAssignment5_TBM
+
+clear all;
+close all;
+clc;
+
+formatData='dd/mm/yyyy'; 
+[datesSet, ratesSet] = readExcelData( "MktData_CurveBootstrap.xls", formatData);
+
+[FlatVol,FlatVol_Strikes]=ReadExcelFlatVol('flat_vol.xls');
+
+% Convert strikes to decimals
+FlatVol_Maturities = [(1:10)';12;15;20];
+
+% Bootstrap the discount curve
+[dates, discounts] = bootstrap(datesSet, ratesSet);
+
+%% Day count conventions
+DepoDayCount = 2; % yearfrac Act/360
+IBDayCount = 3; % yearfrac Act/365
+SwapDateCount = 6; % yearfrac 30/360 European
+
+%% Case study 1
+today = dates(1);
+Maturity = 10;
+
+% Parameters
+PaymentDates = BusinessDates(42, today, "month", 3, 1); 
+DeltaFix = yearfrac(today, PaymentDates(2:end), IBDayCount);
+DeltaMoving = yearfrac(PaymentDates(1:end-1), PaymentDates(2:end), DepoDayCount);
+Discounts = zRatesInterp(dates, discounts, PaymentDates);
+LiborRates = (Discounts(1:end-1)./Discounts(2:end) - 1)./DeltaMoving;
+    
+Frequency = 4;
+flag = 1; %Calibration on LMM
+
+FlatVol_Dates=zeros(14,1);
+FlatVol_Dates = BusinessDates(11,today,"year",1, 1);
+FlatVol_Dates(11:12)= BusinessDates(2,FlatVol_Dates(11),"year",2, 1);
+FlatVol_Dates(12:13)= BusinessDates(2,FlatVol_Dates(12),"year",3, 1);
+FlatVol_Dates(13:14)= BusinessDates(2,FlatVol_Dates(13),"year",5, 1);
+FlatVol_Dates = FlatVol_Dates(2:end);
+
+%graph of the flat volatilities
+figure(1)
+surf(FlatVol_Strikes, FlatVol_Dates, FlatVol);
+ylabel('Dates');
+xlabel('Strike');
+zlabel('Flat Volatility');
+title('Flat Volatilities');
+view(-30, 30); % Set the same view for both plots
+rotate3d on;
+grid on;
+
+% Calibration of spot volatilities
+SpotVol = CalibrationSpotVol(PaymentDates, DeltaFix, DeltaMoving, Discounts, LiborRates, Frequency, FlatVol_Strikes, FlatVol, Maturity, flag);
+
+figure(2)
+    surf(FlatVol_Strikes', PaymentDates(3:end-1)', SpotVol);
+    xlabel('Strike');
+    ylabel('Payment Dates');
+    zlabel('Spot Volatility');
+    title('Calibrated LMM Spot Volatilities');
+    view(-30, 30); % Set the same view for both plots
+    rotate3d on;
+    grid on;
+
+%% point b and g
+
+
+Notional = 50 * 10^6;
+SPOL = 2*1e-2;
+
+
+UpfrontNoDigit = ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, Discounts, SPOL, 'Black');
+UpfrontWithDigit = ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, Discounts, SPOL, 'Digital');
+
+% Print results
+fprintf('Upfront without digital risk (Black model): %.4f\n', UpfrontNoDigit);
+fprintf('Upfront with digital risk (Digital model): %.4f\n', UpfrontWithDigit);
+
+% Price results
+
+fprintf('Price without digital risk (Black model): %.2f\n', UpfrontNoDigit * Notional);
+fprintf('Price with digital risk (Digital model): %.2f\n', UpfrontWithDigit * Notional);
+
+%% point c
+
+rates_shifted.futures=ratesSet.futures+1e-4;
+rates_shifted.depos=ratesSet.depos+1e-4;
+rates_shifted.swaps=ratesSet.swaps+1e-4;
+
+
+[dates,Discounts_shifted]=bootstrap(datesSet,rates_shifted);
+
+Discounts_shifted = zRatesInterp(dates,Discounts_shifted,PaymentDates);
+LiborRates_shifted = (Discounts_shifted(1:end-1) ./ Discounts_shifted(2:end) - 1) ./ DeltaMoving;
+
+Upfront_shifted = ComputeUpfront(LiborRates_shifted, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, Discounts_shifted, SPOL, 'Black');
+
+UpfrontDiff = abs(Upfront_shifted-UpfrontNoDigit);
+
+%%%%%%%%%%%%%%%%%% BRUH
+
+Index=find(dates == datenum('02-feb-2033'));
+DeltaBucket=zeros(Index,1);
+    
+for i=1:Index-1
+    rates_shifted = ShiftRates(datesSet,ratesSet, dates(i+1), 1e-4);
+    [dates,Discounts_shifted]=bootstrap(datesSet,rates_shifted);  
+
+    Discounts_shifted = zRatesInterp(dates,Discounts_shifted,PaymentDates);
+    LiborRates_shifted = (Discounts_shifted(1:end-1) ./ Discounts_shifted(2:end) - 1) ./ DeltaMoving;
+
+    % Bootstrap spot volatilities
+    SpotVol_shifted = CalibrationSpotVol(PaymentDates, DeltaFix, DeltaMoving, Discounts_shifted, LiborRates_shifted, Frequency, FlatVol_Strikes, FlatVol, Maturity, flag);
+  
+    Upfront_shifted = ComputeUpfront(LiborRates_shifted, FlatVol_Strikes, SpotVol_shifted, DeltaMoving, DeltaFix, Discounts_shifted, SPOL, 'Black');
+
+    DeltaBucket(i)=abs(Upfront_shifted-UpfrontNoDigit);
+
+end
+
+% Print Delta-bucket sensitivities
+fprintf('Delta-bucket sensitivities for all buckets:\n');
+for i = 1:Index-1
+    fprintf('Bucket %d (Date: %s): %.10f\n', i, datestr(dates(i+1), 'dd-mmm-yyyy'), DeltaBucket(i));
+end
+
+%% point d
+
+TotalVega = 0;
+Strike_0y_3y = 4.3 * 1e-2;
+Strike_3y_6y = 4.6 * 1e-2;
+Strike_6y_10y = 5.2 * 1e-2;
+
+LenPayDates = length(PaymentDates) - 2;
+
+for i=1:LenPayDates-1
+    
+    if i <= 12
+        K = Strike_0y_3y;
+    elseif 12 < i && i <= 24
+        K = Strike_3y_6y;
+    else
+        K = Strike_6y_10y;
+    end
+
+    Vol = spline(FlatVol_Strikes, SpotVol(i,:), K);
+    
+    TotalVega = TotalVega + CapletVega(LiborRates(i), K, Vol, DeltaFix(i), DeltaMoving(i+1), Discounts(i+2));
+
+end
+
+% Print results
+fprintf('=== Vega Calculation Results ===\n');
+fprintf('Strike for 0-3y bucket:    %.4f\n', Strike_0y_3y);
+fprintf('Strike for 3-6y bucket:    %.4f\n', Strike_3y_6y);
+fprintf('Strike for 6-10y bucket:   %.4f\n', Strike_6y_10y);
+fprintf('----------------------------\n');
+fprintf('Total Portfolio Vega:      %.4f\n', TotalVega);
+
+%% e
+
+Notional=50e6;
+PaymentDates = BusinessDates(41, today, "month", 3, 1); 
+
+weights1=[1;3/4;1/2;1/4;0];
+weights2=[0;1/4;1/2;3/4;1];
+weights3=[3/4;1/2;1/4;0];
+
+rates_bucket_2y=ratesSet;
+rates_bucket_2y.depos=ratesSet.depos+1e-4;
+rates_bucket_2y.futures=ratesSet.futures+1e-4;
+rates_bucket_2y.swaps(1:5,:)=ratesSet.swaps(1:5,:)+weights1.*1e-4;
+
+rates_bucket_6y=ratesSet;
+rates_bucket_6y.depos=ratesSet.depos+1e-4;
+rates_bucket_6y.futures=ratesSet.futures+1e-4;
+rates_bucket_6y.swaps(1:5,:)=ratesSet.swaps(1:5,:)+weights2*1e-4;
+rates_bucket_6y.swaps(6:9,:)=ratesSet.swaps(6:9,:)+weights3*1e-4;
+
+rates_bucket_10y=ratesSet;
+rates_bucket_10y.depos=ratesSet.depos+1e-4;
+rates_bucket_10y.futures=ratesSet.futures+1e-4;
+rates_bucket_10y.swaps(5:9,:)=ratesSet.swaps(5:9,:)+weights2*1e-4;
+rates_bucket_10y.swaps(10:end,:)=ratesSet.swaps(10:end,:)+1e-4;
+
+rates_shifted=ratesSet;
+rates_shifted.depos=ratesSet.depos+1e-4;
+rates_shifted.futures=ratesSet.futures+1e-4;
+rates_shifted.swaps=ratesSet.swaps+1e-4;
+[~,Discounts_shifted]=bootstrap(datesSet,rates_shifted);
+
+SPOL=0.02;
+Upfront=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, Discounts, SPOL, 'Black');
+
+[~,discounts_2y]=bootstrap(datesSet,rates_bucket_2y);
+Upfront_2y=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, discounts_2y, SPOL, 'Black');
+Delta_2y=Upfront_2y-Upfront;
+
+[~,discounts_6y]=bootstrap(datesSet,rates_bucket_6y);
+Upfront_6y=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, discounts_6y, SPOL, 'Black');
+Delta_6y=Upfront_6y-Upfront;
+
+[~,discounts_10y]=bootstrap(datesSet,rates_bucket_10y);
+Upfront_10y=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, discounts_10y, SPOL, 'Black');
+Delta_10y=Upfront_10y-Upfront;
+
+PaymentDates_bucket_2y=PaymentDates(1:4:9);
+DeltaMoving_bucket_2y=yearfrac(PaymentDates_bucket_2y(1:end-1),PaymentDates_bucket_2y(2:end),6);
+interpolated_discounts_bucket_2y=zRatesInterp(dates,discounts,PaymentDates_bucket_2y);
+BPV_bucket_2y=sum(DeltaMoving_bucket_2y.*interpolated_discounts_bucket_2y(2:end));
+SwapRate_bucket_2y=(1-interpolated_discounts_bucket_2y(end))/BPV_bucket_2y;
+
+interpolated_discounts_bucket_2y=zRatesInterp(dates,Discounts_shifted,PaymentDates_bucket_2y(2:end));
+BPV_bucket_2y=sum(DeltaMoving_bucket_2y.*interpolated_discounts_bucket_2y);
+Sensitivites_Swap_2y=1-interpolated_discounts_bucket_2y(end)-SwapRate_bucket_2y*BPV_bucket_2y;
+
+PaymentDates_bucket_6y=PaymentDates(1:4:25);
+DeltaMoving_bucket_6y=yearfrac(PaymentDates_bucket_6y(1:end-1),PaymentDates_bucket_6y(2:end),6);
+interpolated_discounts_bucket_6y=zRatesInterp(dates,discounts,PaymentDates_bucket_6y);
+BPV_bucket_6y=sum(DeltaMoving_bucket_6y.*interpolated_discounts_bucket_6y(2:end));
+SwapRate_bucket_6y=(1-interpolated_discounts_bucket_6y(end))/BPV_bucket_6y;
+
+interpolated_discounts_bucket_6y=zRatesInterp(dates,Discounts_shifted,PaymentDates_bucket_6y);
+BPV_bucket_6y=sum(DeltaMoving_bucket_6y.*interpolated_discounts_bucket_6y(2:end));
+Sensitivites_Swap_6y=1-interpolated_discounts_bucket_6y(end)-SwapRate_bucket_6y*BPV_bucket_6y;
+
+PaymentDates_bucket_10y=PaymentDates(1:4:end);
+DeltaMoving_bucket_10y=yearfrac(PaymentDates_bucket_10y(1:end-1),PaymentDates_bucket_10y(2:end),6);
+interpolated_discounts_bucket_10y=zRatesInterp(dates,discounts,PaymentDates_bucket_10y);
+BPV_bucket_10y=sum(DeltaMoving_bucket_10y.*interpolated_discounts_bucket_10y(2:end));
+SwapRate_bucket_10y=(1-interpolated_discounts_bucket_10y(end))/BPV_bucket_10y;
+
+interpolated_discounts_bucket_10y=zRatesInterp(dates,Discounts_shifted,PaymentDates_bucket_10y);
+BPV_bucket_10y=sum(DeltaMoving_bucket_10y.*interpolated_discounts_bucket_10y(2:end));
+Sensitivites_Swap_10y=1-interpolated_discounts_bucket_10y(end)-SwapRate_bucket_10y*BPV_bucket_10y;
+
+DV01_2y=Delta_2y;
+DV01_6y=Delta_6y+Delta_2y;
+DV01_10y=Delta_10y+Delta_6y+Delta_2y;
+
+x_10y=-DV01_10y*Notional/Sensitivites_Swap_10y;
+x_6y=-(Sensitivites_Swap_10y*x_10y+DV01_6y*Notional)/Sensitivites_Swap_6y;
+x_2y=-(Sensitivites_Swap_10y*x_10y+Sensitivites_Swap_6y*x_6y+DV01_2y*Notional)/Sensitivites_Swap_2y;
+
+% Print result
+fprintf('\n=== Delta-Hedging ===\n');
+fprintf('Delta-Hedging with bucket 10y: %.2f EUR\n', x_10y);
+fprintf('Delta-Hedging with bucket 6y: %.2f EUR\n', x_6y);
+fprintf('Delta-Hedging with bucket 2y: %.2f EUR\n', x_2y);
+
+%% f
+
+weights1=([0:1/15:1]')*ones(1,13);
+weights2=([1:-1/15:0]')*ones(1,13);
+
+SpotVol_shifted_6y=SpotVol;
+SpotVol_shifted_6y(1:23,:)=SpotVol(1:23,:)+1e-4;
+SpotVol_shifted_6y(24:end,:)=SpotVol(24:end,:)+weights2*1e-4;
+
+SpotVol_shifted_10y=SpotVol;
+SpotVol_shifted_10y(1:23,:)=SpotVol(1:23,:);
+SpotVol_shifted_10y(24:end,:)=SpotVol(24:end,:)+weights1*1e-4;
+
+Upfront=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol, DeltaMoving, DeltaFix, discounts, SPOL, 'Black');
+Vega_6y=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol_shifted_6y, DeltaMoving, DeltaFix, discounts, SPOL, 'Black')-Upfront;
+Vega_10y=ComputeUpfront(LiborRates, FlatVol_Strikes, SpotVol_shifted_10y, DeltaMoving, DeltaFix, discounts, SPOL, 'Black')-Upfront;
+
+
+CapVega_6y=CapVega(LiborRates, FlatVol_Strikes, SpotVol, DeltaFix, DeltaMoving, discounts,SwapRate_bucket_6y);
+CapVega_10y=CapVega(LiborRates, FlatVol_Strikes, SpotVol, DeltaFix, DeltaMoving, discounts,SwapRate_bucket_10y);
+
+xVega_10y=-Vega_10y*Notional/CapVega_10y;
+xVega_6y=-(xVega_10y*CapVega_10y+Vega_6y*Notional)/CapVega_6y;
+%% Case study 2
+
+flag = -1;
+PaymentDates = BusinessDates(42, today, "month", 3, 1); 
+
+SpotVol = CalibrationSpotVol(PaymentDates, DeltaFix, DeltaMoving, Discounts, LiborRates, Frequency, FlatVol_Strikes, FlatVol, Maturity, flag);
+
+figure(3);
+surf(FlatVol_Strikes', PaymentDates(3:end-1)', SpotVol);
+xlabel('Strike');
+ylabel('Payment Dates');
+zlabel('Spot Volatility');
+title('Calibrated BMM Spot Volatilities');
+rotate3d on;
+grid on;
+
+%% Pricing
+
+% Parameters
+Value_Date = dates(1);
+Maturity = 4;
+intervalSteps = 3; % Quarterly payment
+numberPayments = 17; % How many times we receive the coupon
+PaymentDates2 = BusinessDates(numberPayments, Value_Date, 'month', intervalSteps, 1);
+lambda = 0.1; % Correlation decay
+delta = DeltaMoving(1:16);
+PaymentDates2 = PaymentDates2(2:end); % We delete the Value Date
+Notional = 1e5; % Monte Carlo paths
+
+% Build correlation matrix
+LenTimeSteps = length(PaymentDates2);
+corrMat = zeros(LenTimeSteps);
+for i = 1:LenTimeSteps
+    for j = 1:LenTimeSteps
+        corrMat(i,j) = exp(-lambda * abs(yearfrac(PaymentDates2(i), PaymentDates2(j), IBDayCount)));
+    end
+end
+
+% Cholesky decomposition
+C = chol(corrMat, 'lower');
+
+% Initialize payoff vector
+Payoffs = zeros(Notional, LenTimeSteps - 1);
+
+% We estract the Libor Rates corresponding to the first 4 years
+NewLiborRates = LiborRates(1:LenTimeSteps);
+
+% Interpolation of the volatilities given the dynamic strikes
+strike = NewLiborRates; % dynamic strike
+sigma = spline(FlatVol_Strikes, SpotVol(1:LenTimeSteps,:), strike);
+
+
+% Monte Carlo Simulation
+rng(1);
+for j = 1:Notional
+    Z = randn(LenTimeSteps, 1); % Standard gaussian random variables
+    dW = C * Z;                        
+
+    % Simulation of the path of the Libor Rates
+    L_path = NewLiborRates;
+    for i = 2:LenTimeSteps
+        dt = delta(i);
+        curr_sigma = sigma(i);
+        prev_sigma = sigma(i-1);
+
+        L_curr = L_path(i) * exp(-0.5 * curr_sigma^2 * dt + curr_sigma * sqrt(dt) * dW(i));
+        L_prev = L_path(i-1) * exp(-0.5 * prev_sigma^2 * dt + prev_sigma * sqrt(dt) * dW(i-1));
+
+        Payoffs(j, i-1) = delta(i) * max(L_curr - L_prev - 5*1e-4, 0); % 5 bps = 0.0005
+    end
+end
+
+Discounts_MC = Discounts(3:LenTimeSteps+1);  % We skip the first two dates: Value date and first 3m
+price_per_path = sum(Payoffs .* Discounts_MC', 2);
+price = mean(price_per_path);
+
+% Print result
+fprintf('\n=== Case Study 2: Exotic Cap Pricing ===\n');
+fprintf('Monte Carlo Estimated Price for one option: %.6f EUR\n', price);
+
