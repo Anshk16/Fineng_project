@@ -1,0 +1,413 @@
+% runAssignment6
+%  group 9, AY2024-2025
+% to run:
+% > runAssignment6_TBM
+
+clear all;
+close all;
+clc;
+
+formatData='dd/mm/yyyy'; 
+[datesSet, ratesSet] = readExcelData( "MktData_CurveBootstrap.xls", formatData);
+
+% Bootstrap the discount curve
+[dates, discounts] = bootstrap(datesSet, ratesSet);
+
+%% Day count conventions
+DepoDayCount = 2; % yearfrac Act/360
+IBDayCount = 3; % yearfrac Act/365
+SwapDateCount = 6; % yearfrac 30/360 European
+
+%% Case Study 1
+
+% volatility, skewness and kurtosis for the Variance Gamma
+
+VG = struct('name','VG','sigma', 0.1366, 'k', 1.6034, 'eta', 5.4258);
+
+% volatility, skewness and kurtosis for the Normal Inverse Gaussian
+
+NIG = struct('name','NIG','sigma', 0.1064, 'k', 1.2231, 'eta', 12.367);
+
+
+% parameters
+
+load("cSelect.mat")
+Today = dates(1);
+Strike = 3200;
+Trigger = 6*1e-2;
+PrincipalAmount = 1e8;
+SPOL = 1.5*1e-2;
+
+Nsim = 100000;     % Number of Monte Carlo paths
+Nsteps = 2;        % Annual steps (2 years)
+
+
+S0 = cSelect.reference;
+DividendYield = cSelect.dividend;
+K = cSelect.strikes;
+Vol = cSelect.surface;
+
+Dates1y = BusinessDates(2, Today, "year", 1, 1); 
+Disc1y = zRatesInterp(dates, discounts, Dates1y);
+TTM = yearfrac(Dates1y(1),Dates1y(2),IBDayCount);
+ZR = -log(Disc1y(2))./TTM;
+
+F0 = S0*exp(TTM*(ZR-DividendYield));
+
+%% Point A-B
+
+% Setting payment dates (floating and fixed leg)
+FloatingDates_2y = BusinessDates(9, Today, "month", 3, 1); 
+PaymentDates_2y = BusinessDates(3, Today, "year", 1, 1);
+ResetDates_2y = [Today; busdate(PaymentDates_2y(2:end) - 2, "previous")];
+
+% Computing discounts
+FloatingDiscounts_2y = zRatesInterp(dates, discounts, FloatingDates_2y);
+PaymentDiscounts_2y = zRatesInterp(dates, discounts, PaymentDates_2y);
+ResetDiscounts_2y = zRatesInterp(dates, discounts, ResetDates_2y);
+
+
+DeltaFloat_2y = yearfrac(FloatingDates_2y(1:end-1),FloatingDates_2y(2:end),DepoDayCount);
+DeltaPrev_2y = yearfrac(ResetDates_2y(1:end-1), ResetDates_2y(2:end), SwapDateCount);
+DeltaFoll_2y = yearfrac(Today, PaymentDates_2y(2:end), SwapDateCount);
+
+% Simulating Stoxx50's paths and computing the upfront of the certificate
+% 2y
+% (VG Model)
+S_VG = simulatePaths(VG, S0, F0, DeltaPrev_2y, Nsteps, Nsim);
+Upfront_VG_2y = UpfrontCalculation2Years(S_VG, Strike, PaymentDiscounts_2y, SPOL, DeltaFoll_2y, DeltaFloat_2y, FloatingDiscounts_2y);
+% For the request b, we choose another model (NIG Model)
+S_NIG = simulatePaths(NIG, S0, F0, DeltaPrev_2y, Nsteps, Nsim);
+Upfront_NIG_2y = UpfrontCalculation2Years(S_NIG, Strike, PaymentDiscounts_2y, SPOL, DeltaFoll_2y, DeltaFloat_2y, FloatingDiscounts_2y);
+
+
+% Print results
+fprintf('--- Upfront Payment Comparison (2 Years)---\n');
+fprintf('Model: Variance Gamma (VG)\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_VG_2y);
+
+fprintf('\nModel: Normal Inverse Gaussian (NIG)\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_NIG_2y);
+
+
+%% Point C
+
+% Setting payment dates (floating and fixed leg)
+FloatingDates_3y = BusinessDates(13, Today, "month", 3, 1); 
+PaymentDates_3y = BusinessDates(4, Today, "year", 1, 1);
+ResetDates_3y = [Today; busdate(PaymentDates_3y(2:end) - 2, "previous")];
+
+% Computing discounts
+FloatingDiscounts_3y = zRatesInterp(dates, discounts, FloatingDates_3y);
+PaymentDiscounts_3y = zRatesInterp(dates, discounts, PaymentDates_3y);
+
+
+DeltaFloat_3y = yearfrac(FloatingDates_3y(1:end-1),FloatingDates_3y(2:end),DepoDayCount);
+DeltaFoll_3y = yearfrac(Today, PaymentDates_3y(2:end), SwapDateCount);
+
+
+% Computing the upfront of the certificate 3y
+% The simulation of the underlying is above
+Upfront_VG_3y = UpfrontCalculation3Years(S_VG, Strike, PaymentDiscounts_3y, SPOL, DeltaFoll_3y, DeltaFloat_3y, FloatingDiscounts_3y);
+Upfront_NIG_3y = UpfrontCalculation3Years(S_NIG, Strike, PaymentDiscounts_3y, SPOL, DeltaFoll_3y, DeltaFloat_3y, FloatingDiscounts_3y);
+
+
+% Print results
+fprintf('\n--- Upfront Payment Comparison (3 Years)---\n');
+fprintf('Model: Variance Gamma (VG)\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_VG_3y);
+
+fprintf('\nModel: Normal Inverse Gaussian (NIG)\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_NIG_3y);
+
+%% Point E
+
+Delta = yearfrac(ResetDates_2y(1:end-1), ResetDates_2y(2:end), SwapDateCount);
+SigmaB = interp1(K, Vol, Strike, 'spline');
+S_B = simulateBPaths(S0, F0, Delta, Nsteps, Nsim, ResetDiscounts_2y, SigmaB, DividendYield);
+Upfront_B_2y = UpfrontCalculation2Years(S_B, Strike, PaymentDiscounts_2y, SPOL, DeltaFoll_2y, DeltaFloat_2y, FloatingDiscounts_2y);
+
+Error_B_VG = abs(Upfront_B_2y-Upfront_VG_2y);
+
+fprintf('\n--- Upfront Payment Comparison (2 Years)---\n');
+fprintf('Model: Variance Gamma (VG)\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_VG_2y);
+
+fprintf('\nModel: Black Model\n');
+fprintf('Upfront Payment: %.4f\n', Upfront_B_2y);
+
+fprintf('\nError between Variance Gamma Model and Black Model\n');
+fprintf('Error: %.6f\n', Error_B_VG);
+
+
+%% Case study 2
+
+% Parameters
+today = dates(1);
+Maturity = 10;
+Strike = 5e-2;
+FirstExerciseDate = addtodate(today, 2, "year"); % We start to exercise the swaption from the second year
+
+% According to the contract, these are the dates when we can exercise the
+% swaption
+ExerciseDates = BusinessDates(8, FirstExerciseDate, 'year', 1, 1);
+
+
+% Hull-White parameters
+alpha = 0.1;
+sigma = 8e-3;
+
+% We cannot consider continuous time, so we take a discretization
+% We take 52 weeks per year (times 10y)
+
+TimeSteps = 520; % as higher as possible, to take dt smaller. 
+dt = Maturity / TimeSteps;
+
+muCap = 1 - exp(- alpha * dt);
+sigmaCap = sigma * sqrt((1 - exp(- 2 * alpha * dt)) / (2 * alpha));
+sigmaStar= (sigma / alpha) * sqrt(dt+(1/(2*alpha))*(1-exp(-2*alpha*dt))-(2/alpha)*(1-exp(-alpha*dt)));
+sigma_function = @(s,t) sigma * (1 - exp(- alpha * (t - s))) / alpha;
+
+AlgorithmDates = zeros(TimeSteps + 1,1);
+AlgorithmDates(1) = today;
+for i = 2:TimeSteps+1
+    AlgorithmDates(i) = addtodate(AlgorithmDates(i - 1), 7, "day");
+end
+
+% PAY ATTENTION: This is an approx
+AlgorithmDiscounts = zRatesInterp(dates, discounts, AlgorithmDates);
+        
+% Parameters for the tree
+dx = sqrt(3) * sigmaCap;
+
+% Searching the optimal l_max (the nearest possible to the lower bound of
+% l_max which gives us a multiplier of Deltax)
+l_max_down = (1 - sqrt(2/3)) / muCap;
+x_max_down = l_max_down * dx;
+x_max = ceil(x_max_down / dx) * dx;
+l_max = x_max / dx;
+
+flag = x_max / dx;
+SwitchCycleFor = flag;
+
+l = 0;
+grid_x = zeros(2 * SwitchCycleFor + 1, TimeSteps);
+% Building the tree
+for i = 1:TimeSteps
+    if i <= SwitchCycleFor % Approach A
+        l = [l(1) + 1; l; l(end) - 1];
+        grid_x(flag - i + 1:flag + i + 1, i) = l * dx; 
+    else
+        grid_x(:,i) = grid_x(:, i - 1); % We cannot go above l_max/x_max or dowm -l_max/-x_max
+    end
+end
+
+DiscountedPayoff = @(payoff, discount) payoff .* discount;
+% Probabilities for trinomial tree
+
+% Approach A
+pu = @(l) 1/2 * (1/3 - l*muCap + (l*muCap).^2);  
+pm = @(l) 2/3 - (l*muCap).^2;      
+pd = @(l) 1/2 * (1/3 + l*muCap + (l*muCap).^2);
+
+% Approach B
+pu_B = 1/2 * (1/3 -l_max*muCap + (l_max*muCap)^2);   
+pm_B = -1/3 + 2 * l_max*muCap - (l_max*muCap)^2;         
+pd_B = 1/2 * (7/3 - 3*l_max*muCap + (l_max*muCap)^2);  
+
+% Approach C
+pu_C = 1/2 * (7/3 - 3*l_max*muCap + ((l_max*muCap)^2));  
+pm_C= -1/3 + 2 * l_max*muCap - (l_max*muCap)^2;   
+pd_C = 1/2 * (1/3 - l_max*muCap + (l_max*muCap)^2);  
+
+%% Computation of the discounts (not from bootstrap)
+term1 = @(ti, tau) 0.5 * (exp(-2 * alpha * tau) - exp(-2 * alpha * yearfrac(today, ti, IBDayCount) - tau) + 1 - exp(-2 * alpha * yearfrac(today, ti, IBDayCount)));
+term2 = @(ti, tau) 2 * (exp(-alpha * tau) - exp(-alpha * yearfrac(today, ti, IBDayCount) - tau) + 1 - exp(-alpha * yearfrac(today, ti, IBDayCount)));
+
+integral = @(ti, tau, xi) exp(-xi * sigma_function(0, tau) / sigma - 0.5 * (sigma ^ 2 / alpha ^ 3) * (term1(ti, tau) - term2(ti, tau)));
+
+
+%% Starting the backward induction
+% Starting payoffs
+LastIndex = TimeSteps - 1/dt; % we take the last year when we can exercise the swaption (9y)
+prev_payoffs=SwaptionPayoff(LastIndex ,AlgorithmDates,grid_x(:, LastIndex),AlgorithmDiscounts,alpha,sigma,Strike, dt, today, term1, term2, integral, sigma_function);
+
+count = 2; % useful when we use only A approach
+for i = LastIndex:-1:1 % backward induction from year 9
+        
+    if i > SwitchCycleFor % We take into account all three approaches
+        % Computation of the stochastic discount factor
+        B=(AlgorithmDiscounts(i+1)/AlgorithmDiscounts(i))*integral(AlgorithmDates(i), dt, grid_x(:, i));
+        D_B=@(deltax) B(1).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(1,i)));
+        D_C=@(deltax) B(end).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(end,i)));
+        D_A=@(deltax) B(2:end-1).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(2:end-1,i)));
+
+        ExpValue_C = pu_C * DiscountedPayoff(prev_payoffs(1), D_C(0)) + pm_C * DiscountedPayoff(prev_payoffs(2), D_C(-dx)) + pd_C * DiscountedPayoff(prev_payoffs(3), D_C(-2 * dx));
+        ExpValue_B = pd_B * DiscountedPayoff(prev_payoffs(end), D_B(0)) + pm_B * DiscountedPayoff(prev_payoffs(end - 1), D_B(dx)) + pu_B * DiscountedPayoff(prev_payoffs(end - 2), D_B(2 * dx));
+        ExpValue_A = pd(grid_x(3:end, i) / dx) .* DiscountedPayoff(prev_payoffs(3:end), D_A(-dx)) + pm(grid_x(2:end - 1, i) / dx) .* DiscountedPayoff(prev_payoffs(2:end-1), D_A(0)) + pu(grid_x(1:end - 2, i) / dx) .* DiscountedPayoff(prev_payoffs(1:end-2), D_A(dx));
+        prev_payoffs = [ExpValue_C; ExpValue_A; ExpValue_B]; % Updating the payoff
+
+    else % We take only the approach A because we are not anymore on the boundes
+        B=(AlgorithmDiscounts(i+1)/AlgorithmDiscounts(i))*integral(AlgorithmDates(i), dt, grid_x(count:end - count + 1, i));
+        D=@(deltax) B.*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(count:end - count + 1,i)));
+        prev_payoffs = pd(grid_x(count + 1:end - count + 2, i) / dx) .* DiscountedPayoff(prev_payoffs(3:end), D(-dx)) + pm(grid_x(count:end - count + 1, i) / dx) .* DiscountedPayoff(prev_payoffs(2:end-1), D(0)) + pu(grid_x(count - 1:end - count, i) / dx) .* DiscountedPayoff(prev_payoffs(1:end-2), D(dx));
+        count = count + 1;
+    end
+    if mod(i - 1, 1 / dt) == 0 && i >= (1 / dt) * 2 % Bermudan condition and ignoring the first year
+        prev_payoffs = max(SwaptionPayoff(i - 1,AlgorithmDates,grid_x(:, LastIndex),AlgorithmDiscounts,alpha,sigma,Strike, dt, today, term1, term2, integral, sigma_function), prev_payoffs); 
+    end
+end
+       
+
+%%
+BermudanPrice = prev_payoffs;
+fprintf('The Bermudan Price is: %.4f\n', BermudanPrice * 1e8);
+
+%% point b
+
+LastIndex = TimeSteps - 1/dt; % we take the last year when we can exercise the swaption (9y)
+prev_payoffs=SwaptionPayoff(LastIndex ,AlgorithmDates,grid_x(:, LastIndex),AlgorithmDiscounts,alpha,sigma,Strike, dt, today, term1, term2, integral, sigma_function);
+
+count = 2; % useful when we use only A approach
+for i = LastIndex:-1:1 % backward induction from year 9
+        
+    if i > SwitchCycleFor % We take into account all three approaches
+        % Computation of the stochastic discount factor
+        B=(AlgorithmDiscounts(i+1)/AlgorithmDiscounts(i))*integral(AlgorithmDates(i), dt, grid_x(:, i));
+        D_B=@(deltax) B(1).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(1,i)));
+        D_C=@(deltax) B(end).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(end,i)));
+        D_A=@(deltax) B(2:end-1).*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(2:end-1,i)));
+
+        ExpValue_C = pu_C * DiscountedPayoff(prev_payoffs(1), D_C(0)) + pm_C * DiscountedPayoff(prev_payoffs(2), D_C(-dx)) + pd_C * DiscountedPayoff(prev_payoffs(3), D_C(-2 * dx));
+        ExpValue_B = pd_B * DiscountedPayoff(prev_payoffs(end), D_B(0)) + pm_B * DiscountedPayoff(prev_payoffs(end - 1), D_B(dx)) + pu_B * DiscountedPayoff(prev_payoffs(end - 2), D_B(2 * dx));
+        ExpValue_A = pd(grid_x(3:end, i) / dx) .* DiscountedPayoff(prev_payoffs(3:end), D_A(-dx)) + pm(grid_x(2:end - 1, i) / dx) .* DiscountedPayoff(prev_payoffs(2:end-1), D_A(0)) + pu(grid_x(1:end - 2, i) / dx) .* DiscountedPayoff(prev_payoffs(1:end-2), D_A(dx));
+        prev_payoffs = [ExpValue_C; ExpValue_A; ExpValue_B]; % Updating the payoff
+
+    else % We take only the approach A because we are not anymore on the boundes
+        B=(AlgorithmDiscounts(i+1)/AlgorithmDiscounts(i))*integral(AlgorithmDates(i), dt, grid_x(count:end - count + 1, i));
+        D=@(deltax) B.*exp(-0.5*(sigmaStar^2)-(sigmaStar/sigmaCap)*(deltax+muCap*grid_x(count:end - count + 1,i)));
+        prev_payoffs = pd(grid_x(count + 1:end - count + 2, i) / dx) .* DiscountedPayoff(prev_payoffs(3:end), D(-dx)) + pm(grid_x(count:end - count + 1, i) / dx) .* DiscountedPayoff(prev_payoffs(2:end-1), D(0)) + pu(grid_x(count - 1:end - count, i) / dx) .* DiscountedPayoff(prev_payoffs(1:end-2), D(dx));
+        count = count + 1;
+    end
+end
+
+EuropeanPrice = prev_payoffs;
+fprintf('The Bermudan Price is: %.4f\n', EuropeanPrice * 1e8);
+
+%% Part b: Validation with Jamshidian's method
+    % Create discount curve function
+    discount_func = @(t) interp1(dates, discounts, t, 'spline', 'extrap');
+    exercise_years = 2:10;
+    notional = 1e8;
+    
+    % Calculate European swaptions using Jamshidian
+    european_prices = zeros(size(exercise_years));
+    for idx = 1:length(exercise_years)
+        Tj = exercise_years(idx);
+        cash_flow_times = Tj+1:Maturity;
+        european_prices(idx) = jamshidian_swaption(discount_func, alpha, sigma, Tj,...
+                                                  cash_flow_times, Strike, notional);
+    end
+    
+    %% Display results and validation
+    disp('=== Pricing Results ===');
+    disp(['Bermudan Swaption Price: ', num2str(BermudanPrice)]);
+    disp('European Swaption Prices (Jamshidian):');
+    disp(array2table([exercise_years; european_prices], ...
+        'RowNames', {'Exercise Year', 'Price'}, ...
+        'VariableNames', strsplit(num2str(1:length(exercise_years)))));
+  if BermudanPrice >= max(european_prices)
+        disp('Validation PASSED: Bermudan price >= max European');
+    else
+        disp('Validation FAILED: Potential tree implementation issue');
+  end
+    
+%% Return prices
+bermudan_price = BermudanPrice;
+
+
+%% point d
+
+rates=ratesSet;
+ddates=datesSet;
+
+N=1;
+PaymentDates = BusinessDates(41, today, "month", 3, 1); 
+
+weights1=[1;3/4;1/2;1/4;0];
+weights2=[0;1/4;1/2;3/4;1];
+weights3=[3/4;1/2;1/4;0];
+
+rates_bucket_2y=rates;
+rates_bucket_2y.depos=rates.depos+1e-4;
+rates_bucket_2y.futures=rates.futures+1e-4;
+rates_bucket_2y.swaps(1:5,:)=rates.swaps(1:5,:)+weights1.*1e-4;
+
+rates_bucket_6y=rates;
+rates_bucket_6y.depos=rates.depos+1e-4;
+rates_bucket_6y.futures=rates.futures+1e-4;
+rates_bucket_6y.swaps(1:5,:)=rates.swaps(1:5,:)+weights2*1e-4;
+rates_bucket_6y.swaps(6:9,:)=rates.swaps(6:9,:)+weights3*1e-4;
+
+rates_bucket_10y=rates;
+rates_bucket_10y.depos=rates.depos+1e-4;
+rates_bucket_10y.futures=rates.futures+1e-4;
+rates_bucket_10y.swaps(5:9,:)=rates.swaps(5:9,:)+weights2*1e-4;
+rates_bucket_10y.swaps(10:end,:)=rates.swaps(10:end,:)+1e-4;
+
+
+[~,discounts_2y]=bootstrap(ddates,rates_bucket_2y);
+%BermudanPrice_2y=...
+Delta_2y=BermudanPrice_2y-BermudanPrice;
+
+[~,discounts_6y]=bootstrap(ddates,rates_bucket_6y);
+%BermudanPrice_6y=...
+Delta_6y=BermudanPrice_6y-BermudanPrice;
+
+[~,discounts_10y]=bootstrap(ddates,rates_bucket_10y);
+%BermudanPrice_10y=...
+Delta_10y=BermudanPrice_10y-BermudanPrice;
+
+PaymentDates_bucket_2y=PaymentDates(1:4:9);
+DeltaMoving_bucket_2y=yearfrac(PaymentDates_bucket_2y(1:end-1),PaymentDates_bucket_2y(2:end),6);
+interpolated_discounts_bucket_2y=zRatesInterp(dates,discounts,PaymentDates_bucket_2y);
+BPV_bucket_2y=sum(DeltaMoving_bucket_2y.*interpolated_discounts_bucket_2y(2:end));
+SwapRate_bucket_2y=(1-interpolated_discounts_bucket_2y(end))/BPV_bucket_2y;
+
+interpolated_discounts_bucket_2y=zRatesInterp(dates,discounts_2y,PaymentDates_bucket_2y);
+BPV_bucket_2y=sum(DeltaMoving_bucket_2y.*interpolated_discounts_bucket_2y(2:end));
+Sensitivites_Swap_2y=1-interpolated_discounts_bucket_2y(end)-SwapRate_bucket_2y*BPV_bucket_2y;
+
+PaymentDates_bucket_6y=PaymentDates(1:4:25);
+DeltaMoving_bucket_6y=yearfrac(PaymentDates_bucket_6y(1:end-1),PaymentDates_bucket_6y(2:end),6);
+interpolated_discounts_bucket_6y=zRatesInterp(dates,discounts,PaymentDates_bucket_6y);
+BPV_bucket_6y=sum(DeltaMoving_bucket_6y.*interpolated_discounts_bucket_6y(2:end));
+SwapRate_bucket_6y=(1-interpolated_discounts_bucket_6y(end))/BPV_bucket_6y;
+
+interpolated_discounts_bucket_6y=zRatesInterp(dates,discounts_6y,PaymentDates_bucket_6y);
+BPV_bucket_6y=sum(DeltaMoving_bucket_6y.*interpolated_discounts_bucket_6y(2:end));
+Sensitivites_Swap_6y=1-interpolated_discounts_bucket_6y(end)-SwapRate_bucket_6y*BPV_bucket_6y;
+
+PaymentDates_bucket_10y=PaymentDates(1:4:end);
+DeltaMoving_bucket_10y=yearfrac(PaymentDates_bucket_10y(1:end-1),PaymentDates_bucket_10y(2:end),6);
+interpolated_discounts_bucket_10y=zRatesInterp(dates,discounts,PaymentDates_bucket_10y);
+BPV_bucket_10y=sum(DeltaMoving_bucket_10y.*interpolated_discounts_bucket_10y(2:end));
+SwapRate_bucket_10y=(1-interpolated_discounts_bucket_10y(end))/BPV_bucket_10y;
+
+interpolated_discounts_bucket_10y=zRatesInterp(dates,discounts_10y,PaymentDates_bucket_10y);
+BPV_bucket_10y=sum(DeltaMoving_bucket_10y.*interpolated_discounts_bucket_10y(2:end));
+Sensitivites_Swap_10y=1-interpolated_discounts_bucket_10y(end)-SwapRate_bucket_10y*BPV_bucket_10y;
+
+rates_shifted=rates;
+rates_shifted.depos=rates.depos+1e-4;
+rates_shifted.futures=rates.futures+1e-4;
+rates_shifted.swaps=rates.swaps+1e-4;
+[~,discounts_shifted]=bootstrap(ddates,rates_shifted);
+
+DV01_2y=Delta_2y;
+DV01_6y=Delta_6y+Delta_2y;
+DV01_10y=Delta_10y+Delta_6y+Delta_2y;
+
+x_10y=-DV01_10y*N/Sensitivites_Swap_10y;
+x_6y=-(Sensitivites_Swap_10y*x_10y+DV01_6y*N)/Sensitivites_Swap_6y;
+x_2y=-(Sensitivites_Swap_10y*x_10y+Sensitivites_Swap_6y*x_6y+DV01_2y*N)/Sensitivites_Swap_2y;
